@@ -444,6 +444,8 @@ class Uniswap:
         input_token: AddressLike,
         output_token: AddressLike,
         qty: Union[int, Wei],
+        gas_price: float, # gas_price is in units of ether
+        gas_threshold_profit: Optional[float],
         recipient: Optional[AddressLike] = None,
         fee: Optional[int] = None,
         slippage: Optional[float] = None,
@@ -477,6 +479,8 @@ class Uniswap:
                 input_token,
                 output_token,
                 qty,
+                gas_price,
+                gas_threshold_profit,
                 recipient,
                 fee,
                 slippage,
@@ -697,6 +701,8 @@ class Uniswap:
         input_token: AddressLike,
         output_token: AddressLike,
         qty: int,
+        gas_price: float,
+        gas_threshold_profit: Optional[float],
         recipient: Optional[AddressLike],
         fee: int,
         slippage: float,
@@ -734,7 +740,7 @@ class Uniswap:
             else:
                 func_params.insert(len(func_params) - 1, recipient)
                 function = token_funcs.tokenToTokenTransferInput(*func_params)
-            return self._build_and_send_tx(function)
+            return self._build_and_send_tx(function, gas_price=gas_price, gas_threshold_profit=gas_threshold_profit)
         elif self.version == 2:
             min_tokens_bought = int(
                 (1 - slippage)
@@ -756,6 +762,7 @@ class Uniswap:
                     recipient,
                     self._deadline(),
                 ),
+                gas_price=gas_price, gas_threshold_profit=gas_threshold_profit
             )
         elif self.version == 3:
             if fee_on_transfer:
@@ -783,6 +790,8 @@ class Uniswap:
                     }
                 ),
                 self._get_tx_params(),
+                gas_price=gas_price,
+                gas_threshold_profit=gas_threshold_profit
             )
         else:
             raise ValueError  # pragma: no cover
@@ -1435,12 +1444,18 @@ class Uniswap:
         return int(time.time()) + 10 * 60
 
     def _build_and_send_tx(
-        self, function: ContractFunction, tx_params: Optional[TxParams] = None
+        self, function: ContractFunction, tx_params: Optional[TxParams] = None, gas_price: Optional[float] = None,
+            gas_threshold_profit: Optional[float] = None,
     ) -> HexBytes:
         """Build and send a transaction."""
         if not tx_params:
             tx_params = self._get_tx_params()
         transaction = function.build_transaction(tx_params)
+
+        if gas_price is not None:
+            transaction["gasPrice"] = self.w3.to_wei(gas_price, 'ether')
+            transaction.pop("maxFeePerGas")
+            transaction.pop("maxPriorityFeePerGas")
 
         if "gas" not in tx_params:
             # `use_estimate_gas` needs to be True for networks like Arbitrum (can't assume 250000 gas),
@@ -1448,9 +1463,16 @@ class Uniswap:
             # Maybe an issue with ganache? (got GC warnings once...)
             if self.use_estimate_gas:
                 # The Uniswap V3 UI uses 20% margin for transactions
-                transaction["gas"] = Wei(
-                    int(self.w3.eth.estimate_gas(transaction) * 1.2)
-                )
+                if gas_threshold_profit is not None:
+                    threshold = self.w3.to_wei(gas_threshold_profit, 'ether')
+                    gas_calc = transaction["gas"] = Wei(int(self.w3.eth.estimate_gas(transaction) * 1.2))
+
+                    if gas_calc > threshold:
+                        gas = threshold
+                    else:
+                        gas = gas_calc
+
+                    transaction["gas"] = gas
             else:
                 transaction["gas"] = Wei(250_000)
 
